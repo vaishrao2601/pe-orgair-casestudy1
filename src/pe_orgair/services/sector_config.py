@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from decimal import Decimal
 import structlog
-
+from pe_orgair.schemas.sector_config import SectorConfigContract
 from pe_orgair.db.snowflake import db
 from pe_orgair.infrastructure.cache import cache
 
@@ -56,20 +56,36 @@ class SectorConfigService:
     CACHE_KEY_ALL = "sectors:all"
     CACHE_TTL = 3600  # 1 hour
 
-    async def get_config(self, focus_group_id: str) -> Optional[SectorConfig]:
+    async def get_config(self, focus_group_id: str) -> Optional[SectorConfigContract]:
         """Get configuration for a single sector."""
         cache_key = self.CACHE_KEY_SECTOR.format(focus_group_id=focus_group_id)
-        
+
         # Check cache
         cached = cache.get(cache_key)
         if cached:
-            return self._dict_to_config(cached)
-        
+            cfg = self._dict_to_config(cached)
+            return SectorConfigContract(
+                sector_id=cfg.focus_group_id,
+                sector_name=cfg.group_name,
+                sector_code=cfg.group_code,
+                dimension_weights=cfg.dimension_weights,
+                calibrations=cfg.calibrations,
+            )
+
         # Load from database
         config = await self._load_from_db(focus_group_id)
         if config:
             cache.set(cache_key, self._config_to_dict(config), self.CACHE_TTL)
-        return config
+
+            return SectorConfigContract(
+                sector_id=config.focus_group_id,
+                sector_name=config.group_name,
+                sector_code=config.group_code,
+                dimension_weights=config.dimension_weights,
+                calibrations=config.calibrations,
+            )
+
+        return None
 
     async def get_all_configs(self) -> List[SectorConfig]:
         """Get all PE sector configurations."""

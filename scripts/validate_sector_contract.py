@@ -24,9 +24,9 @@ async def main():
         raise RuntimeError(f"Sector config not found for {focus_group_id}")
 
     # Basic identity checks
-    print(f"Sector ID      : {config.focus_group_id}")
-    print(f"Sector Name    : {config.group_name}")
-    print(f"Sector Code    : {config.group_code}")
+    print(f"Sector ID      : {config.sector_id}")
+    print(f"Sector Name    : {config.sector_name}")
+    print(f"Sector Code    : {config.sector_code}")
 
     # Dimension contract
     dimension_count = len(config.dimension_weights)
