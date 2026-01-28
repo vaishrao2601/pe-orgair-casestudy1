@@ -23,6 +23,14 @@ This repository represents Case Study 1 for the PE OrgAIR platform.
 
 ### Phase 1 – Configuration & Sector Modeling (In Progress)
 - Sector configuration service
+The sector configuration API guarantees:
+    - sector_id
+    - sector_name
+    - sector_code
+    - dimension_weights (normalized, sum = 1.0)
+    - calibration parameters (typed decimals)
+
+
 - Dimension weights and calibrations
 - Cache-backed configuration retrieval
 
@@ -35,3 +43,4 @@ This repository represents Case Study 1 for the PE OrgAIR platform.
 - REST endpoints
 - Logging and metrics
 - Performance validation
+
