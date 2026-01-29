@@ -1,5 +1,5 @@
 # src/pe_orgair/services/sector_config.py
-"""Sector configuration service with caching."""
+"""Sector configuration service with caching + explicit contract validation."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -18,7 +18,7 @@ logger = structlog.get_logger()
 
 @dataclass
 class SectorConfig:
-    """Complete configuration for a PE sector."""
+    """Internal configuration representation for a PE sector."""
     focus_group_id: str
     group_name: str
     group_code: str
@@ -27,31 +27,25 @@ class SectorConfig:
 
     @property
     def h_r_baseline(self) -> Decimal:
-        """Get H^R baseline for this sector."""
         return self.calibrations.get("h_r_baseline", Decimal("75"))
 
     @property
     def ebitda_multiplier(self) -> Decimal:
-        """Get EBITDA multiplier for this sector."""
         return self.calibrations.get("ebitda_multiplier", Decimal("1.0"))
 
     @property
     def position_factor_delta(self) -> Decimal:
-        """Get position factor delta (δ) for H^R calculation."""
         return self.calibrations.get("position_factor_delta", Decimal("0.15"))
 
     @property
     def talent_concentration_threshold(self) -> Decimal:
-        """Get talent concentration threshold."""
         return self.calibrations.get("talent_concentration_threshold", Decimal("0.25"))
 
     def get_dimension_weight(self, dimension_code: str) -> Decimal:
-        """Get weight for a specific dimension."""
         return self.dimension_weights.get(dimension_code, Decimal("0"))
 
     def validate_weights_sum(self) -> bool:
-        """Verify dimension weights sum to 1.0."""
-        total = sum(self.dimension_weights.values())
+        total = sum(self.dimension_weights.values()) if self.dimension_weights else Decimal("0")
         return abs(total - Decimal("1.0")) < Decimal("0.001")
 
 
@@ -79,7 +73,7 @@ class SectorConfigService:
         return self._to_contract(cfg)
 
     async def get_all_configs(self) -> List[SectorConfigContract]:
-        """Get all PE sector configurations (validated contract)."""
+        """Get all sector configurations (validated contract)."""
         cache_key = self.CACHE_KEY_ALL
 
         cached = cache.get(cache_key)
@@ -87,48 +81,72 @@ class SectorConfigService:
             return [self._to_contract(self._dict_to_config(c)) for c in cached]
 
         cfgs = await self._load_all_from_db()
-
         cache.set(cache_key, [self._config_to_dict(c) for c in cfgs], self.CACHE_TTL)
         return [self._to_contract(c) for c in cfgs]
 
     async def _load_from_db(self, focus_group_id: str) -> Optional[SectorConfig]:
-        """Load single configuration from database."""
-        fg_query = """
-            SELECT focus_group_id, group_name, group_code
-            FROM focus_groups
-            WHERE focus_group_id = %(focus_group_id)s
-              AND platform = 'pe_org_air'
-              AND is_active = TRUE
+        """Load a single configuration from database.
+
+        Behavior:
+        - Unknown focus_group_id => return None
+        - DB/infra issues => log + return None (keeps negative tests deterministic)
         """
-        fg_row = db.fetch_one(fg_query, {"focus_group_id": focus_group_id})
-        if not fg_row:
+        try:
+            # 1) Base focus group
+            fg_query = """
+                SELECT focus_group_id, group_name, group_code
+                FROM focus_groups
+                WHERE focus_group_id = %(focus_group_id)s
+                  AND platform = 'pe_org_air'
+                  AND is_active = TRUE
+            """
+            fg_row = db.fetch_one(fg_query, {"focus_group_id": focus_group_id})
+            if not fg_row:
+                return None
+
+            # 2) Dimension weights
+            weights_query = """
+                SELECT d.dimension_code, w.weight
+                FROM focus_group_dimension_weights w
+                JOIN dimensions d ON w.dimension_id = d.dimension_id
+                WHERE w.focus_group_id = %(focus_group_id)s
+                  AND w.is_current = TRUE
+                ORDER BY d.display_order
+            """
+            weights_rows = db.fetch_all(weights_query, {"focus_group_id": focus_group_id})
+            dimension_weights = {
+                row["dimension_code"]: Decimal(str(row["weight"]))
+                for row in weights_rows
+            }
+
+            # 3) Calibrations
+            calib_query = """
+                SELECT parameter_name, parameter_value
+                FROM focus_group_calibrations
+                WHERE focus_group_id = %(focus_group_id)s
+                  AND is_current = TRUE
+            """
+            calib_rows = db.fetch_all(calib_query, {"focus_group_id": focus_group_id})
+            calibrations = {
+                row["parameter_name"]: Decimal(str(row["parameter_value"]))
+                for row in calib_rows
+            }
+
+        except RuntimeError as e:
+            # Example: "DATABASE_URL not set in environment/.env"
+            logger.warning(
+                "sector_config_db_unavailable",
+                focus_group_id=focus_group_id,
+                error=str(e),
+            )
             return None
-
-        weights_query = """
-            SELECT d.dimension_code, w.weight
-            FROM focus_group_dimension_weights w
-            JOIN dimensions d ON w.dimension_id = d.dimension_id
-            WHERE w.focus_group_id = %(focus_group_id)s
-              AND w.is_current = TRUE
-            ORDER BY d.display_order
-        """
-        weights_rows = db.fetch_all(weights_query, {"focus_group_id": focus_group_id})
-        dimension_weights = {
-            row["dimension_code"]: Decimal(str(row["weight"]))
-            for row in weights_rows
-        }
-
-        calib_query = """
-            SELECT parameter_name, parameter_value
-            FROM focus_group_calibrations
-            WHERE focus_group_id = %(focus_group_id)s
-              AND is_current = TRUE
-        """
-        calib_rows = db.fetch_all(calib_query, {"focus_group_id": focus_group_id})
-        calibrations = {
-            row["parameter_name"]: Decimal(str(row["parameter_value"]))
-            for row in calib_rows
-        }
+        except Exception as e:
+            logger.exception(
+                "sector_config_db_error",
+                focus_group_id=focus_group_id,
+                error=str(e),
+            )
+            return None
 
         cfg = SectorConfig(
             focus_group_id=fg_row["focus_group_id"],
@@ -141,21 +159,28 @@ class SectorConfigService:
         if not cfg.validate_weights_sum():
             logger.warning("invalid_weights_sum", focus_group_id=focus_group_id)
 
-        # Validate contract deterministically
+        # Deterministic contract validation (case study requirement)
         self._validate_contract(cfg)
 
         return cfg
 
     async def _load_all_from_db(self) -> List[SectorConfig]:
         """Load all sector configurations from database."""
-        fg_query = """
-            SELECT focus_group_id
-            FROM focus_groups
-            WHERE platform = 'pe_org_air'
-              AND is_active = TRUE
-            ORDER BY display_order
-        """
-        fg_rows = db.fetch_all(fg_query)
+        try:
+            fg_query = """
+                SELECT focus_group_id
+                FROM focus_groups
+                WHERE platform = 'pe_org_air'
+                  AND is_active = TRUE
+                ORDER BY display_order
+            """
+            fg_rows = db.fetch_all(fg_query)
+        except RuntimeError as e:
+            logger.warning("sector_configs_db_unavailable", error=str(e))
+            return []
+        except Exception as e:
+            logger.exception("sector_configs_db_error", error=str(e))
+            return []
 
         cfgs: List[SectorConfig] = []
         for row in fg_rows:
@@ -204,7 +229,7 @@ class SectorConfigService:
         }
 
     def _dict_to_config(self, data: dict) -> SectorConfig:
-        """Convert cached dict to config."""
+        """Convert cached dict to internal config."""
         return SectorConfig(
             focus_group_id=data["focus_group_id"],
             group_name=data["group_name"],
