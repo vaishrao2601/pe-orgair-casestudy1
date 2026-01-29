@@ -29,6 +29,7 @@ The sector configuration API guarantees:
     - sector_code
     - dimension_weights (normalized, sum = 1.0)
     - calibration parameters (typed decimals)
+    - Cache behavior validated (DB hit → cache hit → invalidation reload)
 
 
 - Dimension weights and calibrations
@@ -43,4 +44,5 @@ The sector configuration API guarantees:
 - REST endpoints
 - Logging and metrics
 - Performance validation
+
 
